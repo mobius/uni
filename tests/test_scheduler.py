@@ -222,6 +222,20 @@ def test_pipeline_double_buffering():
     asyncio.run(_test())
 
 
+def test_phi_daemon_manager():
+    """PhiDaemonManager 接口与生命周期验证"""
+    from scheduler.phi_client import PhiDaemonManager
+    mgr = PhiDaemonManager()
+    assert mgr.host == "172.31.1.1"
+    assert mgr.port == 19800
+    # 验证 Ping 或启动
+    ok = mgr.start_daemon(timeout_sec=10.0)
+    assert ok, "failed to start phi daemon"
+    res = mgr.ping()
+    assert res["status"] == "pass", f"ping failed: {res}"
+    assert res["total_roundtrip_sec"] < 0.05, f"roundtrip too high: {res['total_roundtrip_sec']}s"
+
+
 # ── Benchmarks API ──
 
 def test_benchmark_imports():
@@ -241,7 +255,8 @@ if __name__ == "__main__":
         test_task_node, test_task_graph_empty, test_task_graph_power,
         test_profiler_model,
         test_scheduler_init, test_nlc_dgemm_api,
-        test_pipeline_double_buffering, test_benchmark_imports,
+        test_pipeline_double_buffering, test_phi_daemon_manager,
+        test_benchmark_imports,
     ]
     ok = 0
     for t in tests:
