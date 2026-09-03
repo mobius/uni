@@ -82,8 +82,8 @@ if [ "$VE_COUNT" -gt 0 ]; then
 
     # 卡状态
     if command -v vecmd &>/dev/null; then
-        info "VE 卡状态 (vecmd):"
-        sudo /opt/nec/ve/bin/vecmd state get 2>/dev/null || warn "无法执行 vecmd (需 sudo)"
+        info "VE 卡状态 (vecmd info):"
+        vecmd info 2>/dev/null | grep -E "VE State|VE Model|VE Type|Core Clock|Memory Clock|Temperature" | head -20 || warn "无法读取 vecmd info"
     fi
     echo
 
