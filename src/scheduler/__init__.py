@@ -13,8 +13,9 @@ Submodules:
 
 from .devices import DeviceInfo, discover_all, discover_phi, discover_ve
 from .phi import compile_phi_kernel, run_phi_kernel
-from .ve import compile_ve_kernel, run_ve_kernel
+from .ve import compile_ve_kernel, run_ve_kernel, compile_ve_dgemm_nlc, run_ve_dgemm_nlc
 from .numa import NUMABinder, get_binder, bind_cmd, best_node
 from .power import PowerCap, get_cap, estimate_power
 from .task_graph import TaskNode, TaskGraph
 from .profiler import Profiler, DeviceModel, OpEstimate
+from .pipeline import DoubleBufferedPipeline, BatchItem

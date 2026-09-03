@@ -170,10 +170,12 @@ def test_scheduler_init():
         DeviceInfo, discover_all,
         compile_phi_kernel, run_phi_kernel,
         compile_ve_kernel, run_ve_kernel,
+        compile_ve_dgemm_nlc, run_ve_dgemm_nlc,
         NUMABinder, get_binder,
         PowerCap, get_cap,
         TaskNode, TaskGraph,
         Profiler,
+        DoubleBufferedPipeline, BatchItem,
     )
     # 所有导出可用
     assert DeviceInfo is not None
@@ -181,6 +183,43 @@ def test_scheduler_init():
     assert PowerCap is not None
     assert TaskGraph is not None
     assert Profiler is not None
+    assert DoubleBufferedPipeline is not None
+    assert BatchItem is not None
+    assert callable(compile_ve_dgemm_nlc)
+    assert callable(run_ve_dgemm_nlc)
+
+
+def test_nlc_dgemm_api():
+    """NLC DGEMM 接口可用性测试"""
+    from scheduler.ve import compile_ve_dgemm_nlc, run_ve_dgemm_nlc
+    assert callable(compile_ve_dgemm_nlc)
+    assert callable(run_ve_dgemm_nlc)
+    # 编译 NLC DGEMM 二进制
+    ok = compile_ve_dgemm_nlc()
+    assert ok, "compile_ve_dgemm_nlc failed"
+
+
+def test_pipeline_double_buffering():
+    """DoubleBufferedPipeline 异步双缓冲执行测试"""
+    import asyncio
+    from scheduler.pipeline import DoubleBufferedPipeline, BatchItem
+
+    async def _test():
+        pipeline = DoubleBufferedPipeline(buffer_size=2)
+        async def mock_prod(b_id):
+            await asyncio.sleep(0.01)
+            return f"data_{b_id}"
+        async def mock_cons(item: BatchItem):
+            await asyncio.sleep(0.01)
+            return {"status": "ok", "processed": item.data}
+        
+        results = await pipeline.run(total_batches=3, producer_fn=mock_prod, consumer_fn=mock_cons)
+        assert len(results) == 3
+        for idx, r in enumerate(results):
+            assert r["batch_id"] == idx
+            assert r["processed"] == f"data_{idx}"
+
+    asyncio.run(_test())
 
 
 # ── Benchmarks API ──
@@ -201,7 +240,8 @@ if __name__ == "__main__":
         test_power_estimation, test_power_cap_budget, test_power_singleton,
         test_task_node, test_task_graph_empty, test_task_graph_power,
         test_profiler_model,
-        test_scheduler_init, test_benchmark_imports,
+        test_scheduler_init, test_nlc_dgemm_api,
+        test_pipeline_double_buffering, test_benchmark_imports,
     ]
     ok = 0
     for t in tests:
