@@ -48,25 +48,24 @@ def compile_ve(name,src,extra=""):
 
 
 def run_phi_clean(inp:Path,wd:Path)->Path:
-    """scp → Phi → scp"""
-    uid=uuid.uuid4().hex[:8]
-    remote_in = f"/tmp/dc_{uid}_in.bin"
-    remote_out= f"/tmp/dc_{uid}_out.bin"
-
-    print("[phi] scp → mic0...")
-    sh(f"scp {inp} mic0:{remote_in}",to=30)
-
-    env=os.environ.copy()
-    if MIC_LIBS.is_dir(): env["SINK_LD_LIBRARY_PATH"]=str(MIC_LIBS)
-    print("[phi] clean...")
-    rc,out,err,_=sh(f"micnativeloadex {APP/'phi/data_clean.mic'} -d 0 -t 60 -a \"{remote_in} {remote_out}\"",env=env,to=120)
-    for l in (out+err).splitlines():
-        if l.strip(): print(f"    {l.strip()}")
-    if rc!=0: return None
-
-    out_path=wd/"cleaned.bin"
-    sh(f"scp mic0:{remote_out} {out_path}",to=30)
-    print(f"  → {out_path.stat().st_size//1024}KB")
+    """Daemon OP_DATA_CLEAN（内存载荷，无 scp / micnativeloadex）。"""
+    sys.path.insert(0, str(PROJECT / "src"))
+    from scheduler.phi_client import PhiDaemonManager
+    mgr = PhiDaemonManager()
+    if not mgr.start_daemon():
+        print("[phi] daemon start failed")
+        return None
+    print("[phi] clean (daemon OP_DATA_CLEAN)...")
+    t0 = time.time()
+    res = mgr.run_data_clean(inp.read_bytes())
+    elapsed = time.time() - t0
+    if res.get("status") != "pass":
+        print(f"  FAILED: {res}")
+        return None
+    out_path = wd / "cleaned.bin"
+    out_path.write_bytes(res["cleaned"])
+    print(f"  rtt={elapsed:.3f}s kernel={res.get('kernel_elapsed_sec', 0):.3f}s "
+          f"→ {out_path.stat().st_size//1024}KB")
     return out_path
 
 

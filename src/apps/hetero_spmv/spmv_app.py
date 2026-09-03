@@ -104,65 +104,30 @@ def generate_csr(N: int, density: float, wd: Path) -> dict:
 
 
 def run_phi_partition(csr_path: Path, wd: Path) -> tuple[float, dict]:
-    """scp CSR → Phi partition → scp blocks back"""
-    import uuid
-    exe = APP_DIR / "phi" / "csr_partition.mic"
-    env = os.environ.copy()
-    if MIC_LIBS.is_dir():
-        env["SINK_LD_LIBRARY_PATH"] = str(MIC_LIBS)
-
-    # Unique run ID to avoid stale files
-    run_id = uuid.uuid4().hex[:8]
-    remote_prefix = f"/tmp/spmv_{run_id}"
-    remote_in = f"{remote_prefix}_input.csr"
-    remote_full = f"{remote_prefix}_full.csr"
-
-    # 1. scp CSR to Phi
-    print(f"[phi] scp input → mic0:{remote_in}")
-    t0 = time.time()
-    rc, _, err, _ = shell(f"scp {csr_path} mic0:{remote_in}", timeout=30)
-    if rc != 0:
-        print(f"  scp FAILED: {err}")
+    """Daemon OP_CSR_PARTITION（内存往返，无 scp / micnativeloadex）。"""
+    sys.path.insert(0, str(PROJECT / "src"))
+    from scheduler.phi_client import PhiDaemonManager
+    mgr = PhiDaemonManager()
+    if not mgr.start_daemon():
+        print("[phi] daemon start failed")
         return 0, {}
-    print(f"  ✓ {time.time()-t0:.1f}s")
-
-    # 2. Run Phi partition
-    print("[phi] CSR partition (244 threads)...")
+    print("[phi] CSR partition (daemon OP_CSR_PARTITION)...")
     t0 = time.time()
-    args = f'"{remote_in} {remote_prefix}"'
-    rc, out, err, _ = shell(
-        f"micnativeloadex {exe} -d 0 -t 60 -a {args}", timeout=120, env=env)
+    res = mgr.run_csr_partition(csr_path.read_bytes())
     phi_time = time.time() - t0
-    for line in (out + err).splitlines():
-        if line.strip():
-            print(f"    {line.strip()}")
-    if rc != 0:
-        print(f"  Phi FAILED: {err}")
+    if res.get("status") != "pass" or len(res.get("blocks", [])) != 3:
+        print(f"  FAILED: {res.get('error', res)}")
         return phi_time, {}
-    print(f"  ✓ {phi_time:.1f}s")
-
-    # 3. scp blocks back
     blocks = []
     meta = {}
-    print(f"[phi] scp blocks ← mic0:{remote_prefix}_*.bin")
-    for i in range(3):
-        remote = f"mic0:{remote_prefix}_block_{i}.bin"
+    for i, blob in enumerate(res["blocks"]):
         local = wd / f"block_{i}.bin"
-        rc, _, err, _ = shell(f"scp {remote} {local}", timeout=30)
-        if rc == 0 and local.exists():
-            blocks.append(local)
-            data = local.read_bytes()
-            meta["N"] = struct.unpack("i", data[:4])[0]
-            meta["nnz"] = struct.unpack("i", data[4:8])[0]
-            print(f"  block_{i}: {local.stat().st_size//1024}KB ✓")
-        else:
-            print(f"  block_{i}: FAILED - {err}")
-
-    # 4. scp full CSR
-    rc, _, err, _ = shell(f"scp mic0:{remote_full} {wd / 'input.csr'}", timeout=30)
-    if rc == 0:
-        print(f"  full_csr: {(wd/'input.csr').stat().st_size//1024}KB ✓")
-
+        local.write_bytes(blob)
+        blocks.append(local)
+        meta["N"] = struct.unpack("i", blob[:4])[0]
+        meta["nnz"] = struct.unpack("i", blob[4:8])[0]
+        print(f"  block_{i}: {local.stat().st_size//1024}KB nnz={meta['nnz']}")
+    print(f"  rtt={phi_time:.3f}s kernel={res.get('kernel_elapsed_sec', 0):.3f}s")
     return phi_time, {"N": meta.get("N", N), "blocks": blocks}
 
 
@@ -246,7 +211,7 @@ async def main():
     print("  结果")
     print("=" * 60)
     print(f"  矩阵: N={N}, nnz={meta['nnz']}")
-    print(f"  Phi 分块: {phi_time:.1f}s (scp+partition+scp)")
+    print(f"  Phi 分块: {phi_time:.3f}s (daemon OP_CSR_PARTITION)")
     print(f"  VE 并行:  {ve_time:.3f}s")
     print(f"  max_diff:  {max_diff:.2e}")
     print(f"  mean_diff: {mean_diff:.2e}")

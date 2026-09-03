@@ -235,6 +235,34 @@ def test_phi_daemon_manager():
     assert res["status"] == "pass", f"ping failed: {res}"
     assert res["total_roundtrip_sec"] < 0.05, f"roundtrip too high: {res['total_roundtrip_sec']}s"
 
+    import numpy as np
+    n = 32
+    rng = np.random.default_rng(0)
+    mat = rng.normal(0, 1, (n, n)).astype(np.float64)
+    st = mgr.run_stats(n, mat.tobytes())
+    assert st.get("status") == "pass", f"stats failed: {st}"
+    assert abs(st["min"] - float(mat.min())) < 1e-9
+    assert abs(st["max"] - float(mat.max())) < 1e-9
+    assert abs(st["mean"] - float(mat.mean())) < 1e-9
+    assert abs(st["stddev"] - float(mat.std())) < 1e-6
+    assert st["total_roundtrip_sec"] < 0.5
+
+    # OP_DATA_CLEAN: |x|>3 → column mean
+    M, Nfeat = 32, 8
+    raw = rng.normal(0, 1, (M, Nfeat)).astype(np.float64)
+    raw[0, 0] = 9.0
+    blob = __import__("struct").pack("ii", M, Nfeat) + raw.tobytes()
+    cl = mgr.run_data_clean(blob)
+    assert cl.get("status") == "pass", cl
+    cleaned = np.frombuffer(cl["cleaned"][8:], dtype=np.float64).reshape(M, Nfeat)
+    assert abs(cleaned[0, 0]) < 3.0
+
+    # OP_PATH_GEN tiny
+    params = __import__("struct").pack("ddddiid", 100.0, 0.05, 0.2, 1.0/8, 8, 32, 50.0)
+    pg = mgr.run_path_gen(params)
+    assert pg.get("status") == "pass", pg
+    assert pg["valid"] + pg["invalid"] == 32
+
 
 def test_adaptive_dispatcher():
     """AdaptiveDispatcher 自适应路由与任务感知验证"""

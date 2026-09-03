@@ -77,3 +77,11 @@
 ### Double Buffering (流水线双缓冲)
 - **定义**：一种将 I/O 传输与计算重叠重合（Overlapping）的优化机制。
 - **说明**：通过两块交替使用的内存缓冲区，在加速卡计算当前批次数据（Buffer A）的同时，后台异步读取或传输下一批次数据（Buffer B），有效掩盖通信和 PCIe 数据搬运延迟。
+
+### Adaptive Dispatcher (自适应调度器)
+- **定义**：按算子名与数据规模把任务分到 Host / Phi / VE 的启发式路由组件。
+- **说明**：`scheduler.dispatcher` 在 feature 分支引入。单次 `dispatch()` 约 2 μs。预估数字来自 Profiler 查表，当前实现不做完整 Roofline 强度求解。
+
+### Phi Worker Daemon (Phi 常驻守护进程)
+- **定义**：驻留在 Xeon Phi 卡内、经虚拟网口接任务的常驻进程。
+- **说明**：避免每次 `micnativeloadex` 重新装载。预热后 PING 约 0.4–1 ms。OP_STATS 对 N=512 矩阵往返约 20 ms（含载荷），TC-003 增量 overhead 约 7%。

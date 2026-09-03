@@ -1,55 +1,54 @@
 # Uni — Intel Phi 7120P + NEC VE 1.0×3 Heterogeneous Computing Project
 
-> Server: ASUS ESC4000 G4, 2× Xeon Gold 6252, Rocky Linux 8.10
-> Accelerators: 1× Intel Xeon Phi 7120P (KNC) + 3× NEC Vector Engine 1.0
+> Server: ASUS ESC4000 G4, 2× Xeon Gold 6252, Rocky Linux 8.10  
+> Accelerators: 1× Intel Xeon Phi 7120P (KNC) + 3× NEC Vector Engine 1.0  
+> Default branch is **`master`** (there is no `main`). Feature work lives on `feature/hetero-optimization-v2`.
 
 ## Objective
 
-Heterogeneous compute co-scheduling on a single ESC4000 G4 server, maximizing the complementary compute characteristics of Phi and VE.
+Heterogeneous compute co-scheduling on a single ESC4000 G4, matching Phi and VE to complementary workloads.
 
 ## Compute Capacity
 
 | Metric | Phi 7120P | VE 1.0×3 | **Total** |
 |------|----------|---------|---------|
 | FP64 Theoretical | 1.21 TFLOPS | 6.48 TFLOPS | **7.69 TFLOPS** |
-| FP64 Achievable | 0.58 TFLOPS | 5.25 TFLOPS | **5.83 TFLOPS** |
+| FP64 Achievable (planning) | ~0.58 TFLOPS | ~5.25 TFLOPS | **~5.83 TFLOPS** |
 | Memory | 16 GB GDDR5 | 144 GB HBM2 | **160 GB** |
 | Memory BW | 157 GB/s | 3,186 GB/s | **3,343 GB/s** |
+
+Phi FMA on this machine is about **0.48–0.63 TFLOPS** (~40–52% of 1.21), not “KNC peak”. VE NLC DGEMM N=2048 is about **1.69–1.73 TFLOPS/card** (~78–80% of ~2.16).
 
 ## Progress
 
 | Phase | Content | Status |
 |-------|------|------|
-| 0 | Hardware verification & baseline | ✅ |
+| 0 | Hardware verification | ✅ |
 | 1 | Software stack (uv/ncc/ICC) | ✅ |
-| 2 | Core scheduler (7 modules) | ✅ |
-| 3 | Benchmarks (TC-001~006) | ✅ 4/6 passed, 5/6 noted |
-| 4 | Applications (SpMV + Prep + MC) | ✅ |
+| 2 | Core scheduler | ✅ |
+| 3 | Benchmarks TC-001–006 | ✅ 4/6 pass; TC-003 pipeline still load-bound |
+| 4 | Apps (SpMV + prep + MC) | ✅ |
+| 5 | NLC API + double-buffer **template** | ✅ Template tested; examples still serial |
+| 6 | Phi resident daemon | ✅ OP_STATS wired into TC-003 / examples/pipeline |
+| 7.1 | Adaptive dispatcher prototype | 🚀 Opcode+size routing; ~2 μs; not a full Roofline solver |
 
 ## Quick Start
 
 ```bash
-# 1. Hardware check
 bash scripts/check_hw.sh
 
-# 2. Python environment (uv)
 cd env && uv venv && source .venv/bin/activate && uv pip install numpy rich
 cd ..
 
-# 3. Basic verification
-bash examples/basic/run.sh          # 4-card parallel baseline (3,277 GFLOPS)
+bash examples/basic/run.sh          # 4-card FMA baseline (not the same metric as TC-002)
+./env/.venv/bin/python3 scripts/bench_throughput.py  # ~5.6 TFLOPS on this host
+./env/.venv/bin/python3 scripts/bench_pcie.py
+./env/.venv/bin/python3 scripts/bench_mpi.py
 
-# 4. Benchmarks
-./env/.venv/bin/python3 scripts/bench_throughput.py # 5.68 TFLOPS
-./env/.venv/bin/python3 scripts/bench_pcie.py       # PCIe bandwidth
-./env/.venv/bin/python3 scripts/bench_mpi.py        # MPI scalability
-
-# 5. Applications
 ./env/.venv/bin/python3 src/apps/hetero_spmv/spmv_app.py
 ./env/.venv/bin/python3 src/apps/hetero_dataprep/dataprep_app.py
 ./env/.venv/bin/python3 src/apps/monte_carlo/mc_app.py
 
-# 6. Full acceptance
 bash scripts/run_all.sh 2>&1 | tee acceptance.log
 ```
 
@@ -57,43 +56,42 @@ bash scripts/run_all.sh 2>&1 | tee acceptance.log
 
 | Test | Metric | Result | Verdict |
 |------|------|------|------|
-| TC-001 PCIe BW | 3VE concurrent H2D | 13.7 GB/s (86% eff) | ⚠️ |
-| TC-002 Throughput | 4-card parallel | **5.68 TFLOPS** | ✅ |
-| TC-003 Pipeline Latency | Phi transit overhead | 569% (startup bottleneck) | ⚠️ |
-| TC-004 MPI Scalability | 3-card ring efficiency | **97.8%** (VE2-adjusted) | ✅ |
+| TC-001 PCIe BW | 3×VE concurrent H2D | 13.7 GB/s (86% eff) | ⚠️ |
+| TC-002 Throughput | 4-card N=2048 | **~5.56–5.76 TFLOPS** (live 5.62) | ✅ vs ≥5.0; **tied with `master` (5.61)** |
+| TC-003 Pipeline | VE-only + daemon OP_STATS increment | VE 0.324 s; stats **21.9 ms**; **6.8%** overhead | ✅ ≤20%; loadex FMA control **580%** |
+| TC-004 MPI | 3-card ring | **97.8%** | ✅ |
+| Phi daemon PING | heartbeat RTT | **0.4–1.0 ms** after warmup | N=512 stats RTT ~20 ms (2 MB payload) |
+| Dispatch microbench | `dispatch()` | live **~2.0 μs** | CPU only |
+
+Live comparison: `docs/research/20260903_024928_master_vs_feature_perf.md`.  
+Claim audit: `docs/research/20260903_025200_feature_claim_audit.md`.
 
 ## Applications
 
 | App | Path | Flow | Result |
 |------|------|------|------|
-| Hetero SpMV | `src/apps/hetero_spmv/` | Host→Phi partition→3VE parallel | 0.107s, max_diff 1.07e-14 |
+| Hetero SpMV | `src/apps/hetero_spmv/` | Host→Phi partition→3VE | 0.107s, max_diff 1.07e-14 |
 | Data Prep | `src/apps/hetero_dataprep/` | Phi clean→VE1 std→VE2 PCA | corr 0.997, std diff 3.55e-15 |
-| Monte Carlo | `src/apps/monte_carlo/` | Phi paths→3VE payoff discount | diff 0.15% vs numpy |
+| Monte Carlo | `src/apps/monte_carlo/` | Phi paths→3VE payoff | diff 0.15% vs numpy |
 
-## Scheduler Architecture
+## Scheduler (feature)
 
 ```
-TaskGraph (DAG + power capping)
-  ├── DeviceMgr → auto-detect Phi + 3×VE
-  ├── NUMABinder → numactl affinity binding
-  ├── PowerCap → 1440W effective budget
-  ├── PhiRunner → micnativeloadex + scp I/O
-  ├── VERunner → ve_exec file passthrough
-  └── Profiler → estimate vs. actual comparison
+TaskGraph (DAG, optional device="auto")
+  ├── AdaptiveDispatcher → opcode + N heuristics, VE round-robin (~2 μs)
+  ├── NUMABinder / PowerCap (1440 W)
+  ├── PhiClient → resident daemon (PING ~1 ms; OP_STATS on the pipeline)
+  ├── VERunner → NLC DGEMM helper (~1.7 TFLOPS/card at N=2048)
+  └── DoubleBufferedPipeline → unit-tested template only
 ```
+
+Naive DGEMM (~64 GFLOPS) → NLC is a **library** win already used by `master` TC-002. Do not report it as feature-vs-master speedup.
+
+Double-buffer bench (`scripts/bench_double_buffer.py`, N=2048 × 4) matches checksums but **no wall-clock speedup** (0.95×): host generation dominates and contends with `ve_exec`.
 
 ## Key Constraints
 
-- **PCIe Gen3 ×16**: Only 15.75 GB/s vs. 4.4 TB/s internal BW (~280:1 ratio)
-- **PSU 1600W**: Full load 1730W exceeds rating (PowerCap: 1440W budget)
-- **Phi passive cooling**: Must be in Slot 1 (nearest intake)
-- **Incompatible programming models**: ICC 16.0 vs. ncc 5.4.1, no unified framework
-- **Phi file I/O**: Requires scp bidirectional transfer; no filesystem passthrough (unlike VE)
-
-## Core Strategy
-
-1. Minimize PCIe traffic — compute locally on-card after data load
-2. Task-characteristic matching — dense compute on VE, irregular access on Phi
-3. Python scheduling layer — asyncio DAG task graph + NUMA affinity + power capping
-4. uv-first — never pollute the global Python environment
-5. Phi I/O via scp — micnativeloadex has no shared filesystem (VirtIO investigated, /tmp faster)
+- **PCIe Gen3 ×16**: ~15.75 GB/s vs multi-TB/s on-card
+- **PSU 1600 W**: PowerCap budget 1440 W
+- **Phi passive cooling**: Slot 1
+- **Split toolchains**: ICC 16.0 (`-mmic`) vs ncc; Phi I/O via scp

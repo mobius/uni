@@ -1,37 +1,57 @@
 # 分支与主线基线性能对比分析报告 (Performance Comparison)
 
-> 报告日期: 2026-09-03 01:49:00  
-> 对比基准: `origin/master` (Week 6 终期验收基线) vs `feature/hetero-optimization-v2`  
-> 测试环境: ASUS ESC4000 G4 (2× Xeon Gold 6252, 1× Phi 7120P, 3× NEC VE 1.0)  
-> 责任 Agent: Antigravity (Google DeepMind)  
+> 原稿日期: 2026-09-03 01:49:00  
+> 口径修正: 2026-09-03 02:55:00（现场重跑 + 文档审计）  
+> 对比: `master` @ `e7f87b9` vs `feature/hetero-optimization-v2` @ `2ac8370`  
+> 仓库没有 `main` 分支。  
+> 现场数据: `docs/research/20260903_024928_master_vs_feature_perf.md`  
+> 审计: `docs/research/20260903_025200_feature_claim_audit.md`
+
+**读这份报告时先看口径：**
+
+- **相对 `master`**：TC-002 / TC-003 打平。本分支增量是 API、Daemon PING、调度原型、双缓冲模板。
+- **相对 naive DGEMM（~64 GFLOPS）**：NLC 仍是最大算力跃迁，但这是主线验收期已接入的内核，**不要**写成 feature 相对 `e7f87b9` 的 speedup。
 
 ---
 
-## 1. 核心算子与算力对比 (Core Compute & Roofline)
+## 1. 相对 `master` 的同机现场结果（以这个为准）
 
-| 测试项 / 算子 | 主线历史早期/基线 | 当前 Feature 分支 | 提升幅度 (Speedup) | 备注说明 |
-| :--- | :--- | :--- | :--- | :--- |
-| **VE 基础矩阵乘 (DGEMM N=512)** | 64 GFLOPS (naive 三重循环) | **1,119 GFLOPS** (调度层 NLC 集成) | **17.5× (提升 1648%)** | 彻底突破 HBM 访问未命中造成的内存墙瓶颈 |
-| **VE 大矩阵乘 (DGEMM N=2048)** | 未完全 API 抽象 | **1,725 GFLOPS** (单卡 81% 峰值) | **~27× (相比 naive)** | 3 卡合计达到 **5.08 TFLOPS** 稠密矩阵乘吞吐 |
-| **全卡并行吞吐 (TC-002)** | 5.68 ~ 5.76 TFLOPS | **5.65 ~ 5.76 TFLOPS** | 维持在设计峰值 | 4 卡协同稳定，符合预期 |
-| **Phi 7120P FMA 峰值** | 569 GFLOPS | **571 ~ 586 GFLOPS** | 稳定在 99%~102% | 达到 KNC 架构物理计算极限 |
-
----
-
-## 2. 调度框架与流水线能力对比 (Scheduler & Pipeline Capabilities)
-
-| 维度 | 主线版本 (`master`) | 当前 Feature 分支 (`feature/hetero-optimization-v2`) | 收益与架构意义 |
+| 测试 | master | feature | 相对主线 |
 | :--- | :--- | :--- | :--- |
-| **NLC DGEMM 调用模式** | 需在脚本/应用层手工拼接 shell 与环境路径 | `ve.run_ve_dgemm_nlc()` 标准化调度 API，自动绑定 NUMA 与环境库 | 代码解耦，消除各示例脚本中的命令冗余 |
-| **流水线并发范式** | 静态串行阻塞（先落盘全部数据，再触发加速卡） | **`DoubleBufferedPipeline` 异步双缓冲引擎** | 支持 $K$ 批次计算与 $K+1$ 批次预处理在后台重叠重合 |
-| **测试套件健壮性** | 13 项单元测试 | **15 项单元测试全部 PASS** | 覆盖了 NLC 接口及双缓冲异步流水线 |
-| **工程化治理体系** | 缺少统一规范文档与术语留档 | 完备的 `AGENTS.md`、`docs/glossary.md` 与分层架构规范 | 标准化开发，无敏感信息泄露 |
+| TC-002 四卡合计 | **5.61 TFLOPS** | **5.62 TFLOPS** | 打平（噪声） |
+| VE NLC DGEMM N=2048 | 1.69–1.72 TFLOPS/卡 | 1.69–1.73 TFLOPS/卡 | 同一 NLC |
+| Phi FMA（`peak_fp64.mic`） | 484 GFLOPS / 装载 1.85 s | 494 GFLOPS / 1.84 s | 打平；约理论 1.21 TFLOPS 的 **40–52%**，不是物理极限 |
+| TC-003 纯 VE | 0.43 s | 0.42 s | 打平 |
+| TC-003 含 Phi（脚本仍 `micnativeloadex`） | 1.99 s，overhead 368% | 2.00 s，overhead 373% | 打平；**两边都未达 ≤20%** |
 
 ---
 
-## 3. 瓶颈现状复盘 (Next Bottlenecks to Tackle)
+## 2. 不要和「相对主线」混在一张表里的历史数字
 
-1. **小矩阵计算耗时与启动开销**：
-   - 在 $N=512$ 规模下，NLC 实际计算仅需 ~0.002s，但进程启动及环境加载耗时约 0.10s。矩阵规模增大到 $N=2048$ 时，利用率迅速攀升至 80%+。
-2. **Phi 启动时延依然是全局关键路径**：
-   - 无论 Basic 还是 Multi-Task，只要涉及 Phi，总耗时即被 Phi 的 `micnativeloadex` 开销（~1.7s~2.5s）决定。这为我们后续推进 **Phase 6 (Phi 常驻 Daemon 进程池)** 提供了强力的数据支撑。
+| 对比 | 左 | 右 | 正确含义 |
+| :--- | :--- | :--- | :--- |
+| naive vs NLC，N=512 | ~64 GFLOPS | ~1,119 GFLOPS | 小矩阵 + `ve_exec` 启动开销，利用率低于大矩阵 |
+| naive vs NLC，N=2048 | ~64 GFLOPS | ~1.69–1.75 TFLOPS | 约 25×；相对 VE 理论 ~2.16 TFLOPS 约 **78–81%** |
+| 三卡 NLC 之和 | — | ~5.08–5.13 TFLOPS | **不含 Phi**，不要和 TC-002 四卡合计混用 |
+
+原稿把上表左列写成「主线历史早期/基线」，并把 Phi 571–586 GFLOPS 写成「99%–102% 物理极限」——**已作废**。586/1208 ≈ 48%。
+
+---
+
+## 3. 调度与工程能力（相对 `master` 为真，端到端吞吐为假）
+
+| 维度 | master | feature | 不要写成 |
+| :--- | :--- | :--- | :--- |
+| NLC 调用 | 脚本里直接 `ve_exec` + NLC | 另有 `run_ve_dgemm_nlc()` | 「NLC 让峰值从 64 变 1750」当作本分支相对 master |
+| 双缓冲 | 无模板 | `DoubleBufferedPipeline` + 单测 | 「流水线已重叠、TC-003 已过」——示例仍串行 |
+| Phi 交互 | 每次 `micnativeloadex` | Daemon PING **0.9–2.2 ms** | 「0.41 ms、5000×、TC-003 攻克」 |
+| 自适应路由 | 设备名手写 | 算子名 + `N≤128` + VE 轮询，~2 μs | 「Roofline 求解驱动了 5.6 TFLOPS」 |
+| 单测 | 13 项 | **17** 项（含 Daemon / dispatcher） | 停留在「15 项」的中间快照 |
+
+---
+
+## 4. 仍未关掉的瓶颈
+
+1. **TC-003 脚本未接 Daemon**：含 Phi 链仍 ~2 s，瓶颈是装载，不是 PCIe。
+2. **Daemon `OP_FMA_PEAK` 与 `peak_fp64.mic` 工作量未对齐**（现场曾见 124 vs 627 GFLOPS）。
+3. **小矩阵**：N=512 时 NLC 核内很短，墙钟仍被 `ve_exec` 启动（~0.1 s）吃掉。

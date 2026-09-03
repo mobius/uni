@@ -54,42 +54,28 @@ def compile_ve():
     return rc == 0
 
 
-def run_phi(wd: Path, params: bytes) -> tuple[Path, int, int]:
-    """scp params → Phi → scp paths back"""
-    uid = uuid.uuid4().hex[:8]
-    rp  = f"/tmp/mc_{uid}_params.bin"
-    rpa = f"/tmp/mc_{uid}_paths.bin"
-    rst = f"/tmp/mc_{uid}_stats.bin"
-
-    # scp params
+def run_phi(wd: Path, params: bytes) -> tuple:
+    """Daemon OP_PATH_GEN。"""
+    sys.path.insert(0, str(PROJECT / "src"))
+    from scheduler.phi_client import PhiDaemonManager
     (wd / "params.bin").write_bytes(params)
-    sh(f"scp {wd}/params.bin mic0:{rp}", to=30)
-
-    env = os.environ.copy()
-    if MIC_LIBS.is_dir(): env["SINK_LD_LIBRARY_PATH"] = str(MIC_LIBS)
-
-    print("[phi] path generation + barrier check...")
-    rc, out, err, _ = sh(
-        f"micnativeloadex {APP/'phi/path_gen.mic'} -d 0 -t 120 "
-        f"-a \"{rp} {rpa} {rst}\"", env=env, to=180)
-    for l in (out+err).splitlines():
-        if l.strip(): print(f"    {l.strip()}")
-
-    if rc != 0: return None, 0, 0
-
-    # scp back
+    mgr = PhiDaemonManager()
+    if not mgr.start_daemon():
+        print("[phi] daemon start failed")
+        return None, 0, 0
+    print("[phi] path generation + barrier check (daemon OP_PATH_GEN)...")
+    t0 = time.time()
+    res = mgr.run_path_gen(params)
+    elapsed = time.time() - t0
+    if res.get("status") != "pass":
+        print(f"  FAILED: {res.get('error', res)}")
+        return None, 0, 0
+    valid, invalid = res["valid"], res["invalid"]
     paths_path = wd / "paths.bin"
-    sh(f"scp mic0:{rpa} {paths_path}", to=30)
-    stats_path = wd / "stats.bin"
-    sh(f"scp mic0:{rst} {stats_path}", to=30)
-
-    if not paths_path.exists(): return None, 0, 0
-
-    # Read stats
-    with open(stats_path, "rb") as f:
-        valid   = struct.unpack("i", f.read(4))[0]
-        invalid = struct.unpack("i", f.read(4))[0]
-
+    paths_path.write_bytes(res["paths_blob"])
+    (wd / "stats.bin").write_bytes(res["stats_blob"])
+    print(f"  rtt={elapsed:.3f}s kernel={res.get('kernel_elapsed_sec', 0):.3f}s "
+          f"valid={valid} invalid={invalid}")
     return paths_path, valid, invalid
 
 

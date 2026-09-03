@@ -59,8 +59,8 @@ def task_gen():
     data = struct.pack("i", N) + A.tobytes() + B.tobytes()
     (WORKDIR / "input.bin").write_bytes(data)
 
-    # Reference: C = A×B, then C×2, then transpose
-    C1 = A @ B
+    # dgemm_nlc 按 ColMajor 读 C 序缓冲，numpy 视角下文件中的 C1 ≡ B @ A
+    C1 = B @ A
     C2 = C1 * 2.0
     C3 = C2.T
     return {"status": "pass", "ref_checksum": float(C3.sum()),
@@ -91,33 +91,44 @@ def task_transpose_ve3():
 
 
 def task_stats_phi():
-    """Phi: 统计 C3 的 min/max/mean/stddev"""
-    input_file = WORKDIR / "c3.bin"
-    exe = KERNEL_PH / "peak_fp64.mic"  # 复用已有内核测 Phi 算力
-
-    # 并行跑两个：Phi FP64 峰值 + Host numpy 统计
-    # Phi 峰值 (证明 Phi 在工作)
-    env = os.environ.copy()
-    if MIC_LIBS.is_dir():
-        env["SINK_LD_LIBRARY_PATH"] = str(MIC_LIBS)
-    r_phi = run(f"micnativeloadex {exe} -d 0 -t 30", env=env)
-
-    # Host 端统计 C3
+    """Phi Daemon: 对 C3 做 min/max/mean/stddev，并与 Host numpy 对照。"""
     import numpy as np
-    with open(input_file, "rb") as f:
-        N_read = struct.unpack("i", f.read(4))[0]
-        arr = np.frombuffer(f.read(), dtype=np.float64).reshape(N_read, N_read)
-    stats = {"N": N_read, "min": float(arr.min()), "max": float(arr.max()),
-             "mean": float(arr.mean()), "stddev": float(arr.std())}
+    from scheduler.phi_client import PhiDaemonManager
 
-    # Parse Phi GFLOPS
-    gflops = 0.0
-    for line in r_phi["stdout"].splitlines():
-        if "GFLOPS" in line:
-            try: gflops = float(line.split(":")[-1].strip().split()[0])
-            except: pass
+    input_file = WORKDIR / "c3.bin"
+    raw = input_file.read_bytes()
+    N_read = struct.unpack_from("<i", raw)[0]
+    body = raw[4:]
+    arr = np.frombuffer(body, dtype=np.float64).reshape(N_read, N_read)
+    host_stats = {
+        "N": N_read,
+        "min": float(arr.min()),
+        "max": float(arr.max()),
+        "mean": float(arr.mean()),
+        "stddev": float(arr.std()),
+    }
 
-    return {"status": "pass", "stats": stats, "phi_gflops": gflops}
+    mgr = PhiDaemonManager()
+    if not mgr.start_daemon():
+        return {"status": "fail", "error": "daemon start failed", "stats": host_stats}
+    phi = mgr.run_stats(N_read, body)
+    if phi.get("status") != "pass":
+        return {"status": "fail", "error": phi, "stats": host_stats}
+
+    stats = {
+        "N": N_read,
+        "min": float(phi["min"]),
+        "max": float(phi["max"]),
+        "mean": float(phi["mean"]),
+        "stddev": float(phi["stddev"]),
+    }
+    return {
+        "status": "pass",
+        "stats": stats,
+        "host_stats": host_stats,
+        "phi_rtt_s": phi.get("total_roundtrip_sec", 0.0),
+        "phi_kernel_s": phi.get("kernel_elapsed_sec", 0.0),
+    }
 
 
 def task_report():
@@ -188,8 +199,14 @@ async def main():
     print(f"  参考 min/max: {ref_stats[0]:.6f} / {ref_stats[1]:.6f}")
     print(f"  Phi  min/max: {got_stats[0]:.6f} / {got_stats[1]:.6f}")
 
-    phi_gf = results.get("stats", {}).get("phi_gflops", 0)
-    print(f"\n  Phi 并发测得: {phi_gf:.1f} GFLOPS")
+    sta_node = results.get("stats", {})
+    hs = sta_node.get("host_stats", {})
+    if hs:
+        dmin = abs(sta.get("min", 0) - hs.get("min", 0))
+        dmax = abs(sta.get("max", 0) - hs.get("max", 0))
+        print(f"  Host vs Phi |min|差={dmin:.3e} |max|差={dmax:.3e}")
+        print(f"  Phi stats RTT: {sta_node.get('phi_rtt_s', 0)*1e3:.2f} ms "
+              f"(kernel {sta_node.get('phi_kernel_s', 0)*1e3:.2f} ms)")
     print(f"  流水线总耗时: ~{graph.nodes['report'].end_time - graph.nodes['gen'].start_time:.1f}s")
 
 

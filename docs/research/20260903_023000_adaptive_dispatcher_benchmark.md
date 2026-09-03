@@ -20,7 +20,9 @@
 
 ## 2. 全框架真实多卡算力性能表现
 
-在自适应调度器驱动下，全系统硬件执行算力的端到端性能表现如下：
+下列 GFLOPS 来自 **NLC DGEMM / Phi FMA 内核**，与 `AdaptiveDispatcher` 的 μs 级 CPU 决策 **不是因果关系**。`master` 上同一套 TC-002 约为 5.61 TFLOPS。调度器是算子名 + 规模启发式 + VE 轮询，不是完整 Roofline 求解。
+
+在同一硬件上测到的算力如下：
 
 1. **3× NEC VE 矩阵乘（NLC DGEMM）**：
    - VE1 实测算力：**1,710 GFLOPS** (耗时 0.64s)

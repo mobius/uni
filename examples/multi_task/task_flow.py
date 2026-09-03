@@ -127,7 +127,7 @@ def task_gen():
         A = rng.normal(0, 0.01, (N, N)).astype(np.float64)
         B = rng.normal(0, 0.01, (N, N)).astype(np.float64)
         write_matrix(WORKDIR / f"input_{idx + 1}.bin", A, B)
-        C_ref_sum += A @ B
+        C_ref_sum += B @ A  # NLC ColMajor 视角与 pipeline 示例相同
     
     return {
         "status": "pass",
@@ -175,46 +175,32 @@ def task_aggregate():
 
 
 def task_phi_peak():
-    """Task phi: FP64 peak test on Phi (并行于 VE matmul)
-    
-    无文件 I/O — 直接跑 micnativeloadex, 纯 stdout 输出 GFLOPS.
-    依赖 gen 只是为了串行化启动, 不消费 gen 的数据.
+    """Task phi: Daemon OP_STATS on gen 的 input_1（短任务，与 VE matmul 并行）。
+
+    不再跑 micnativeloadex peak_fp64（那是 ~2s 装载，不是 DAG 里的短工作）。
     """
-    exe = KERNEL_PH / "peak_fp64.mic"
-    
-    # 复用 Basic 示例的峰值内核
-    if not exe.exists():
-        print("[phi] peak_fp64.mic 不存在, 尝试编译...")
-        os.system("podman start centos7-phi-dev 2>/dev/null")
-        # 复制源码到容器编译
-        src = KERNEL_PH / "peak_fp64.c"
-        cmd = (
-            f"podman cp {src} centos7-phi-dev:/tmp/peak_fp64.c && "
-            f"podman exec centos7-phi-dev bash -c '"
-            f"source /opt/intel/bin/compilervars.sh intel64 && "
-            f"icc -std=c99 -mmic -O3 -openmp -o /tmp/peak_fp64.mic /tmp/peak_fp64.c' && "
-            f"podman cp centos7-phi-dev:/tmp/peak_fp64.mic {exe}"
-        )
-        subprocess.run(cmd, shell=True, capture_output=True, timeout=120)
-    
-    env = os.environ.copy()
-    if MIC_LIBS.is_dir():
-        env["SINK_LD_LIBRARY_PATH"] = str(MIC_LIBS)
-    
-    cmd = f"micnativeloadex {exe} -d 0 -t 60"
-    result = run(cmd, timeout=120, env=env)
-    
-    # Parse GFLOPS from Phi output
-    gflops = 0.0
-    for line in result["stdout"].splitlines():
-        if "GFLOPS" in line:
-            try:
-                gflops = float(line.split(":")[-1].strip().split()[0])
-            except (ValueError, IndexError):
-                pass
-    
-    result["gflops"] = gflops
-    return result
+    from scheduler.phi_client import PhiDaemonManager
+    import numpy as np
+    raw = (WORKDIR / "input_1.bin").read_bytes()
+    n = struct.unpack_from("i", raw)[0]
+    # input 是 N + A + B；对 A 做 stats
+    body = raw[4:4 + n * n * 8]
+    mgr = PhiDaemonManager()
+    t0 = time.time()
+    if not mgr.start_daemon():
+        return {"status": "fail", "error": "daemon", "elapsed": time.time() - t0}
+    st = mgr.run_stats(n, body)
+    elapsed = time.time() - t0
+    ok = st.get("status") == "pass"
+    arr = np.frombuffer(body, dtype=np.float64)
+    dmin = abs(st.get("min", 0) - float(arr.min())) if ok else 1.0
+    return {
+        "status": "pass" if ok and dmin < 1e-9 else "fail",
+        "elapsed": elapsed,
+        "stdout": str(st),
+        "phi_rtt_s": st.get("total_roundtrip_sec", elapsed),
+        "gflops": 0.0,
+    }
 
 
 def task_stats():
@@ -312,7 +298,7 @@ async def main():
     # Show stats report
     report_file = WORKDIR / "stats_report.txt"
     if report_file.exists():
-        print(f"\n  Phi 统计报告:")
+        print(f"\n  Host 统计报告:")
         for line in report_file.read_text().strip().splitlines():
             print(f"    {line}")
     

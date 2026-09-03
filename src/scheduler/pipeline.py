@@ -39,7 +39,8 @@ class DoubleBufferedPipeline:
         
         Args:
             total_batches: 总批次数
-            producer_fn: 异步生成函数 async def prod(batch_id) -> data
+            producer_fn: 异步生成函数 async def prod(batch_id) -> data。
+                若生成是 CPU 密集，调用方需自己 `asyncio.to_thread`，否则会堵住事件循环、无法与 consumer 重叠。
             consumer_fn: 异步消费函数 async def cons(batch_item) -> dict
         """
         self.results.clear()

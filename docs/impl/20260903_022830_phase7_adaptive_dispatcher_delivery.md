@@ -13,7 +13,7 @@
 
 **本次交付成果**：
 1. **实现统一的自适应算子调度模块**：`src/scheduler/dispatcher.py`
-   - 根据输入算子类型（DGEMM、SpMV、Monte Carlo、清洗生成等）与数据矩阵规模 $N$，结合 Roofline 算术强度模型实现全自动智能路由。
+   - 根据算子名集合与规模 $N$（例如 $N\le 128$ 走 Host、指定 op 走 Phi、稠密算子 VE 轮询）做启发式路由。`Profiler.estimate` 只填充预估时间/算力，**不是**按算术强度做 Roofline 设备选择。
    - 小规模/控制型逻辑自动路由至 Host CPU。
    - 高并发线程/分支路径自动路由至卡内常驻的 Phi 7120P。
    - 稠密长向量与超高 HBM2 带宽计算自动多卡负载均衡至 3× NEC VE。
