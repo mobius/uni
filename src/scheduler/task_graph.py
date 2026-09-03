@@ -14,13 +14,14 @@ from typing import Optional, Callable
 @dataclass
 class TaskNode:
     name: str
-    device: str          # "host" | "phi0" | "ve1" | "ve2" | "ve3"
-    run_fn: Callable     # async callable that returns dict
+    device: str = "auto" # "auto" | "host" | "phi0" | "ve1" | "ve2" | "ve3"
+    run_fn: Optional[Callable] = None # async callable that returns dict
     depends_on: list[str] = field(default_factory=list)
     
-    # Power estimation (Phase 2: PowerCap integration)
+    # Power & Dispatch estimation
     op: str = "idle"                        # operation type for power estimation
     estimated_watts: float = 0.0            # estimated power draw
+    N: int = 512                            # data size parameter for dispatcher
 
     # Runtime state
     status: str = "pending"   # pending | ready | running | done | failed
@@ -35,7 +36,7 @@ class TaskGraph:
     用法:
         graph = TaskGraph()
         graph.add(TaskNode("gen", "host", gen_fn))
-        graph.add(TaskNode("matmul", "ve1", matmul_fn, depends_on=["gen"]))
+        graph.add(TaskNode("matmul", "auto", matmul_fn, op="dgemm", N=2048, depends_on=["gen"]))
         results = await graph.execute()
 
         # 带功率封顶:
@@ -45,11 +46,24 @@ class TaskGraph:
         results = await graph.execute()
     """
     
-    def __init__(self, power_cap=None):
+    def __init__(self, power_cap=None, dispatcher=None):
         self.nodes: dict[str, TaskNode] = {}
         self._power_cap = power_cap  # Optional PowerCap instance
+        self._dispatcher = dispatcher # Optional AdaptiveDispatcher instance
     
     def add(self, node: TaskNode):
+        # 若指定了 auto 或未指定 device，通过自适应调度器决策
+        if node.device in ("auto", "", None):
+            from .dispatcher import get_dispatcher
+            disp = self._dispatcher or get_dispatcher()
+            decision = disp.dispatch(node.op, N=node.N)
+            node.device = decision.target_device
+
+        # 若未指定功耗预估，自动补全
+        if node.estimated_watts <= 0.0 and node.op != "idle":
+            from .power import estimate_power
+            node.estimated_watts = estimate_power(node.device, node.op)
+
         self.nodes[node.name] = node
 
     def estimated_total_power(self) -> float:

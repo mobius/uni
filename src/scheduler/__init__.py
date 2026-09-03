@@ -20,3 +20,4 @@ from .power import PowerCap, get_cap, estimate_power
 from .task_graph import TaskNode, TaskGraph
 from .profiler import Profiler, DeviceModel, OpEstimate
 from .pipeline import DoubleBufferedPipeline, BatchItem
+from .dispatcher import AdaptiveDispatcher, get_dispatcher, DispatchDecision

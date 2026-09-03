@@ -236,6 +236,37 @@ def test_phi_daemon_manager():
     assert res["total_roundtrip_sec"] < 0.05, f"roundtrip too high: {res['total_roundtrip_sec']}s"
 
 
+def test_adaptive_dispatcher():
+    """AdaptiveDispatcher 自适应路由与任务感知验证"""
+    from scheduler.dispatcher import get_dispatcher
+    from scheduler.task_graph import TaskGraph, TaskNode
+
+    disp = get_dispatcher()
+    # 1. 小数据规模或控制任务 -> 路由至 host
+    dec_small = disp.dispatch("dgemm", N=64)
+    assert dec_small.target_device == "host"
+
+    dec_stats = disp.dispatch("stats", N=1024)
+    assert dec_stats.target_device == "host"
+
+    # 2. 高并发/随机路径/分支逻辑 -> 路由至 phi0
+    dec_mc = disp.dispatch("monte_carlo", N=100000)
+    assert dec_mc.target_device == "phi0"
+
+    # 3. 稠密矩阵与大向量任务 -> 轮询负载均衡至 VE
+    dec_dgemm1 = disp.dispatch("dgemm", N=2048)
+    dec_dgemm2 = disp.dispatch("dgemm", N=2048)
+    assert dec_dgemm1.target_device in ("ve1", "ve2", "ve3")
+    assert dec_dgemm2.target_device in ("ve1", "ve2", "ve3")
+
+    # 4. TaskGraph 自动集成
+    tg = TaskGraph()
+    n_auto = TaskNode("auto_task", device="auto", op="dgemm", N=2048)
+    tg.add(n_auto)
+    assert n_auto.device in ("ve1", "ve2", "ve3")
+    assert n_auto.estimated_watts > 100.0
+
+
 # ── Benchmarks API ──
 
 def test_benchmark_imports():
@@ -256,6 +287,7 @@ if __name__ == "__main__":
         test_profiler_model,
         test_scheduler_init, test_nlc_dgemm_api,
         test_pipeline_double_buffering, test_phi_daemon_manager,
+        test_adaptive_dispatcher,
         test_benchmark_imports,
     ]
     ok = 0
